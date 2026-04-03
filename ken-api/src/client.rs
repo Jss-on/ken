@@ -14,17 +14,17 @@ pub struct AnthropicClient {
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new(api_key: String) -> Result<Self, ApiError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
-            .expect("failed to build HTTP client");
+            .map_err(|e| ApiError::Network(format!("failed to build HTTP client: {e}")))?;
 
-        Self {
+        Ok(Self {
             client,
             api_key,
             model: DEFAULT_MODEL.to_string(),
-        }
+        })
     }
 
     pub fn with_model(mut self, model: &str) -> Self {
@@ -145,8 +145,8 @@ impl AnthropicClient {
                 }
                 Some("content_block_stop") => {
                     if !current_tool_id.is_empty() {
-                        let input: serde_json::Value =
-                            serde_json::from_str(&current_tool_json).unwrap_or_default();
+                        let input: serde_json::Value = serde_json::from_str(&current_tool_json)
+                            .map_err(|e| ApiError::Parse(format!("tool input JSON: {e}")))?;
                         tool_calls.push(ToolCall {
                             id: std::mem::take(&mut current_tool_id),
                             name: std::mem::take(&mut current_tool_name),
@@ -184,12 +184,8 @@ impl AnthropicClient {
         })
     }
 
-    fn parse_json(
-        &self,
-        resp: reqwest::blocking::Response,
-    ) -> Result<AssistantResponse, ApiError> {
-        let body: serde_json::Value =
-            resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
+    fn parse_json(&self, resp: reqwest::blocking::Response) -> Result<AssistantResponse, ApiError> {
+        let body: serde_json::Value = resp.json().map_err(|e| ApiError::Parse(e.to_string()))?;
 
         let mut text = String::new();
         let mut tool_calls = Vec::new();

@@ -30,8 +30,7 @@ impl ToolSpec {
 /// Trait for executing tools — unified interface for both LLM-reasoning
 /// and compute tools (matching claw-code's ToolExecutor pattern)
 pub trait ToolExecutor {
-    fn execute(&mut self, tool_name: &str, input: &serde_json::Value)
-        -> Result<String, ToolError>;
+    fn execute(&mut self, tool_name: &str, input: &serde_json::Value) -> Result<String, ToolError>;
 }
 
 #[derive(Debug, thiserror::Error)]

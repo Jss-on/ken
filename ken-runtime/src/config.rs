@@ -46,26 +46,25 @@ impl Config {
         let mut config = Config::default();
 
         // Layer 1: User config (~/.ken/config.json)
-        if let Some(user_path) = Self::user_config_path() {
-            if let Ok(data) = std::fs::read_to_string(&user_path) {
-                if let Ok(user_config) = serde_json::from_str::<Config>(&data) {
-                    config.merge(user_config);
-                }
-            }
+        if let Some(user_path) = Self::user_config_path()
+            && let Ok(data) = std::fs::read_to_string(&user_path)
+            && let Ok(user_config) = serde_json::from_str::<Config>(&data)
+        {
+            config.merge(user_config);
         }
 
         // Layer 2: Project config (./ken.json)
-        if let Ok(data) = std::fs::read_to_string("ken.json") {
-            if let Ok(proj_config) = serde_json::from_str::<Config>(&data) {
-                config.merge(proj_config);
-            }
+        if let Ok(data) = std::fs::read_to_string("ken.json")
+            && let Ok(proj_config) = serde_json::from_str::<Config>(&data)
+        {
+            config.merge(proj_config);
         }
 
         // Layer 3: Local config (./ken.local.json)
-        if let Ok(data) = std::fs::read_to_string("ken.local.json") {
-            if let Ok(local_config) = serde_json::from_str::<Config>(&data) {
-                config.merge(local_config);
-            }
+        if let Ok(data) = std::fs::read_to_string("ken.local.json")
+            && let Ok(local_config) = serde_json::from_str::<Config>(&data)
+        {
+            config.merge(local_config);
         }
 
         // Layer 4: Environment variables (highest priority)

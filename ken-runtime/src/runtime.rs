@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::session::Session;
-use ken_api::types::*;
 use ken_api::AnthropicClient;
+use ken_api::types::*;
 use ken_tools::{PythonBridge, ToolExecutor, ToolRegistry};
 
 const SYSTEM_PROMPT: &str = r#"You are Ken, a trading strategy design agent. Your job is to help traders formalize their intuitions into systematic trading strategies.
@@ -47,8 +47,7 @@ impl TradingRuntime {
     pub fn new(config: Config, session: Session) -> anyhow::Result<Self> {
         config.validate().map_err(|e| anyhow::anyhow!(e))?;
 
-        let client = AnthropicClient::new(config.api_key.clone())
-            .with_model(&config.model);
+        let client = AnthropicClient::new(config.api_key.clone())?.with_model(&config.model);
         let registry = ToolRegistry::new();
 
         // Locate Python tools directory relative to the binary
@@ -87,10 +86,13 @@ impl TradingRuntime {
             iterations += 1;
 
             let request = self.build_request();
-            let response = self.client.send(&request)
+            let response = self
+                .client
+                .send(&request)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-            self.session.track_tokens(response.input_tokens, response.output_tokens);
+            self.session
+                .track_tokens(response.input_tokens, response.output_tokens);
 
             // Build assistant content blocks for session
             let mut tool_blocks = Vec::new();
@@ -101,7 +103,8 @@ impl TradingRuntime {
                     input: tc.input.clone(),
                 });
             }
-            self.session.add_assistant_message(&response.text, tool_blocks);
+            self.session
+                .add_assistant_message(&response.text, tool_blocks);
 
             if !response.text.is_empty() {
                 final_text.push_str(&response.text);
@@ -154,24 +157,26 @@ impl TradingRuntime {
     ) -> Result<String, ken_tools::registry::ToolError> {
         // Check tool exists
         if self.registry.get(name).is_none() {
-            return Err(ken_tools::registry::ToolError::UnknownTool(name.to_string()));
+            return Err(ken_tools::registry::ToolError::UnknownTool(
+                name.to_string(),
+            ));
         }
 
         // Tools that delegate to Python subprocess
         match name {
             "backtest_strategy" | "fetch_ohlcv" | "analyze_indicator" | "risk_analysis"
             | "render_chart" => {
-                let result = self.python_bridge.call(
-                    &format!("{name}.py"),
-                    input,
-                )?;
+                let result = self.python_bridge.call(&format!("{name}.py"), input)?;
                 Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
             }
 
             // LLM-reasoning tools — the LLM itself produces the output as structured JSON.
             // We just pass the input through as a "done" acknowledgment so the LLM
             // knows the tool was "executed" and can use the result in its next response.
-            "describe_setup" | "propose_entry_rules" | "propose_sl_tp" | "generate_pine"
+            "describe_setup"
+            | "propose_entry_rules"
+            | "propose_sl_tp"
+            | "generate_pine"
             | "register_indicator" => {
                 // These tools are handled by the LLM's own reasoning.
                 // Return the input as confirmation that the tool "executed".
@@ -191,19 +196,22 @@ impl TradingRuntime {
 
             "save_strategy" => {
                 let strategy = &input["strategy"];
-                let name_str = input["name"]
-                    .as_str()
-                    .unwrap_or("unnamed");
+                let name_str = input["name"].as_str().unwrap_or("unnamed");
+                let name_str = validate_strategy_name(name_str)?;
                 std::fs::create_dir_all("strategies")
                     .map_err(|e| ken_tools::registry::ToolError::ExecutionFailed(e.to_string()))?;
                 let path = format!("strategies/{name_str}.json");
-                std::fs::write(&path, serde_json::to_string_pretty(strategy).unwrap_or_default())
-                    .map_err(|e| ken_tools::registry::ToolError::ExecutionFailed(e.to_string()))?;
+                std::fs::write(
+                    &path,
+                    serde_json::to_string_pretty(strategy).unwrap_or_default(),
+                )
+                .map_err(|e| ken_tools::registry::ToolError::ExecutionFailed(e.to_string()))?;
                 Ok(format!(r#"{{"saved": "{path}"}}"#))
             }
 
             "load_strategy" => {
                 let name_str = input["name"].as_str().unwrap_or("");
+                let name_str = validate_strategy_name(name_str)?;
                 let path = format!("strategies/{name_str}.json");
                 let data = std::fs::read_to_string(&path)
                     .map_err(|_| ken_tools::registry::ToolError::DataNotFound(path))?;
@@ -212,11 +220,14 @@ impl TradingRuntime {
 
             "compare_strategies" => {
                 // Delegates to Python for multiple backtests
-                self.python_bridge.call("compare_strategies.py", input)
+                self.python_bridge
+                    .call("compare_strategies.py", input)
                     .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
             }
 
-            _ => Err(ken_tools::registry::ToolError::UnknownTool(name.to_string())),
+            _ => Err(ken_tools::registry::ToolError::UnknownTool(
+                name.to_string(),
+            )),
         }
     }
 }
@@ -249,8 +260,14 @@ fn lint_pine_script(code: &str) -> Vec<String> {
 
     // Check for deprecated v4/v5 functions (should be v6)
     let deprecated = [
-        ("study(", "Use indicator() instead of study() in Pine Script v6"),
-        ("security(", "Use request.security() instead of security() in v6"),
+        (
+            "study(",
+            "Use indicator() instead of study() in Pine Script v6",
+        ),
+        (
+            "security(",
+            "Use request.security() instead of security() in v6",
+        ),
         ("input.int(", "Check: input.int() syntax may differ in v6"),
     ];
     for (pattern, msg) in &deprecated {
@@ -260,6 +277,21 @@ fn lint_pine_script(code: &str) -> Vec<String> {
     }
 
     issues
+}
+
+/// Reject strategy names that could escape the `strategies/` directory.
+fn validate_strategy_name(name: &str) -> Result<&str, ken_tools::registry::ToolError> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains('\0')
+    {
+        return Err(ken_tools::registry::ToolError::Validation(
+            "Strategy name must not be empty or contain path separators".into(),
+        ));
+    }
+    Ok(name)
 }
 
 fn find_python_dir() -> String {

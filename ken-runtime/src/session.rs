@@ -1,6 +1,6 @@
 use ken_api::types::{ContentBlock, Message, Role};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Persistent conversation session stored as JSONL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +76,7 @@ impl Session {
     }
 
     /// Load session from JSONL file
-    pub fn load(dir: &PathBuf, session_id: &str) -> anyhow::Result<Self> {
+    pub fn load(dir: &Path, session_id: &str) -> anyhow::Result<Self> {
         let path = dir.join(format!("{session_id}.jsonl"));
         let data = std::fs::read_to_string(&path)?;
         let session: Session = serde_json::from_str(&data)?;

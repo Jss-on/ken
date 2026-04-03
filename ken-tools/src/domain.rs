@@ -52,11 +52,24 @@ pub struct EntryRule {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum EntryLogic {
-    And { rules: Vec<EntryLogic> },
-    Or { rules: Vec<EntryLogic> },
-    IndicatorCrossover { fast: String, slow: String },
-    Threshold { indicator: String, op: CompareOp, value: f64 },
-    PriceAction { pattern: String },
+    And {
+        rules: Vec<EntryLogic>,
+    },
+    Or {
+        rules: Vec<EntryLogic>,
+    },
+    IndicatorCrossover {
+        fast: String,
+        slow: String,
+    },
+    Threshold {
+        indicator: String,
+        op: CompareOp,
+        value: f64,
+    },
+    PriceAction {
+        pattern: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
