@@ -1,0 +1,12 @@
+[package]
+name = "ken-tools"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ken-api = { path = "../ken-api" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+chrono.workspace = true

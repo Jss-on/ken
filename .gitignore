@@ -1,0 +1,26 @@
+# Rust
+target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+.pytest_cache/
+
+# Ken data
+data/
+strategies/
+sessions/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Config with secrets
+ken.local.json

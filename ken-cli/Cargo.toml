@@ -1,0 +1,18 @@
+[package]
+name = "ken"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ken"
+path = "src/main.rs"
+
+[dependencies]
+ken-api = { path = "../ken-api" }
+ken-runtime = { path = "../ken-runtime" }
+ken-tools = { path = "../ken-tools" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+rustyline.workspace = true
