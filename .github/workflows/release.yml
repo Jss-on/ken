@@ -14,8 +14,11 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       prerelease: ${{ steps.meta.outputs.prerelease }}
+      prerelease_label: ${{ steps.meta.outputs.prerelease_label }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Extract version metadata
         id: meta
@@ -26,11 +29,14 @@ jobs:
           # Detect pre-release: alpha, beta, rc
           if echo "$TAG" | grep -qE '-(alpha|beta|rc)'; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            LABEL=$(echo "$TAG" | sed 's/.*-\([a-z]*\).*/\1/')
+            echo "prerelease_label=$LABEL" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
+            echo "prerelease_label=" >> "$GITHUB_OUTPUT"
           fi
 
-          echo "Tag: v$TAG (prerelease=${{ steps.meta.outputs.prerelease || 'false' }})"
+          echo "::notice::Release v$TAG (prerelease=${{ steps.meta.outputs.prerelease || 'false' }})"
 
       - name: Verify tag matches Cargo.toml
         run: |
@@ -108,14 +114,51 @@ jobs:
       - name: Generate release notes
         id: notes
         run: |
-          # Use git-cliff if available, else fall back to GitHub auto-notes
-          if command -v git-cliff >/dev/null 2>&1; then
-            git-cliff --latest --strip header > RELEASE_NOTES.md
+          VERSION="${{ needs.validate.outputs.version }}"
+          PRERELEASE="${{ needs.validate.outputs.prerelease }}"
+          LABEL="${{ needs.validate.outputs.prerelease_label }}"
+
+          # Collect stats
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          if [ -n "$PREV_TAG" ]; then
+            COMMIT_COUNT=$(git log "${PREV_TAG}..HEAD" --oneline | wc -l)
+            CONTRIBUTORS=$(git log "${PREV_TAG}..HEAD" --format='%aN' | sort -u | paste -sd ', ')
           else
-            # Extract current version section from CHANGELOG.md
-            VERSION="${{ needs.validate.outputs.version }}"
-            sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md | head -n -1 > RELEASE_NOTES.md
+            COMMIT_COUNT=$(git log --oneline | wc -l)
+            CONTRIBUTORS=$(git log --format='%aN' | sort -u | paste -sd ', ')
           fi
+
+          {
+            echo "# Ken v$VERSION"
+            echo ""
+
+            if [ "$PRERELEASE" = "true" ]; then
+              echo "> **${LABEL} pre-release** — not recommended for production use."
+              echo ""
+            fi
+
+            # Try git-cliff for changelog body
+            if command -v git-cliff >/dev/null 2>&1; then
+              git-cliff --latest --strip header 2>/dev/null || true
+            else
+              # Extract current version section from CHANGELOG.md
+              sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md | head -n -1 || true
+            fi
+
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Stats:** $COMMIT_COUNT commits | Contributors: $CONTRIBUTORS"
+            echo ""
+            echo "**Install:**"
+            echo '```bash'
+            echo "# Download and extract"
+            echo "curl -fsSL https://github.com/Jss-on/ken/releases/download/v${VERSION}/ken-linux-amd64.tar.gz | tar xz"
+            echo "./ken-linux-amd64 setup-token"
+            echo '```'
+            echo ""
+            echo "**Full changelog:** [v${PREV_TAG#v}...v${VERSION}](https://github.com/Jss-on/ken/compare/${PREV_TAG}...v${VERSION})"
+          } > RELEASE_NOTES.md
 
           if [ ! -s RELEASE_NOTES.md ]; then
             echo "See [CHANGELOG.md](CHANGELOG.md) for details." > RELEASE_NOTES.md
