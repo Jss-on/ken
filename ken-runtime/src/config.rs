@@ -23,7 +23,7 @@ fn default_model() -> String {
 }
 
 fn default_max_tokens() -> u32 {
-    8192
+    16384
 }
 
 impl Default for Config {

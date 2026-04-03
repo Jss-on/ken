@@ -4,11 +4,14 @@ use crate::session::Session;
 use ken_api::AnthropicClient;
 use ken_api::types::*;
 use ken_tools::{PythonBridge, ToolExecutor, ToolRegistry};
+use std::path::{Path, PathBuf};
 
 /// Number of most-recent tool results to keep intact; older ones get cleared.
 const MICROCOMPACT_KEEP_RECENT: usize = 4;
 /// Placeholder for cleared tool results.
 const CLEARED_TOOL_RESULT: &str = "[Old tool result cleared to reduce context size]";
+/// Max automatic continuations when response is truncated (StopReason::MaxTokens).
+const MAX_CONTINUATIONS: usize = 3;
 
 const SYSTEM_PROMPT: &str = r#"You are Ken, a trading strategy design agent. Your job is to help traders formalize their intuitions into systematic trading strategies.
 
@@ -23,7 +26,24 @@ You have access to trading tools. Use them to analyze data, run backtests, and g
 
 When the trader describes a setup, first use describe_setup to parse it, then analyze_indicator to check signals, then propose_entry_rules and propose_sl_tp to suggest the strategy rules.
 
-Target output is always Pine Script v6 for TradingView."#;
+Target output is always Pine Script v6 for TradingView.
+
+## Code Output Rules
+- When generating Pine Script code, output the COMPLETE code in a single ```pine code block. Never say "I'll generate the code" and defer to a later message — generate it immediately in the same response.
+- If code is long, that is fine. Output the full implementation. Do not truncate or summarize sections with comments like "// ... rest of the code".
+- After generating Pine Script, offer to save it using write_file.
+
+## Tool Error Handling
+- If a tool returns an error (is_error: true), tell the trader exactly what failed and why.
+- If a Python tool fails due to missing dependencies, tell the trader to run `pip install -r requirements.txt`.
+- Never pretend a tool succeeded when it returned an error.
+- If fetch_ohlcv or backtest_strategy fails, acknowledge the failure and continue with what you can do (e.g., generate Pine Script without backtest results).
+
+## File Handling
+- When the trader shares Pine Script or indicator code, use write_file to save it for reference (e.g., to `scripts/indicator_name.pine`).
+- When generating Pine Script, save it with write_file after outputting it.
+- Use read_file to read files the trader references.
+- Use list_files to show available saved scripts or strategies."#;
 
 /// Core agentic loop — adapted from claw-code's ConversationRuntime.
 ///
@@ -58,6 +78,9 @@ impl TradingRuntime {
         // Locate Python tools directory relative to the binary
         let python_dir = find_python_dir();
 
+        // Check Python dependencies at startup (non-blocking warning)
+        check_python_deps();
+
         Ok(Self {
             client,
             registry,
@@ -82,6 +105,7 @@ impl TradingRuntime {
 
         let mut final_text = String::new();
         let mut iterations = 0;
+        let mut continuation_count = 0;
 
         loop {
             if iterations >= self.max_iterations {
@@ -120,22 +144,35 @@ impl TradingRuntime {
                 final_text.push_str(&response.text);
             }
 
-            if response.stop_reason != StopReason::ToolUse || response.tool_calls.is_empty() {
-                break;
-            }
-
-            // Execute each tool call and add results
-            for tc in &response.tool_calls {
-                let result = self.execute_tool(&tc.name, &tc.input);
-                match result {
-                    Ok(output) => {
-                        self.session.add_tool_result(&tc.id, &output, false);
+            match response.stop_reason {
+                StopReason::ToolUse if !response.tool_calls.is_empty() => {
+                    // Execute each tool call and add results
+                    for tc in &response.tool_calls {
+                        let result = self.execute_tool(&tc.name, &tc.input);
+                        match result {
+                            Ok(output) => {
+                                self.session.add_tool_result(&tc.id, &output, false);
+                            }
+                            Err(e) => {
+                                let err_msg = format!("Tool error: {e}");
+                                // Surface tool errors to the user immediately
+                                eprintln!("\n  [Tool Error] {}: {e}\n", tc.name);
+                                self.session.add_tool_result(&tc.id, &err_msg, true);
+                            }
+                        }
                     }
-                    Err(e) => {
-                        let err_msg = format!("Tool error: {e}");
-                        self.session.add_tool_result(&tc.id, &err_msg, true);
-                    }
+                    // Continue the loop for the next API call
                 }
+                StopReason::MaxTokens if continuation_count < MAX_CONTINUATIONS => {
+                    // Response was truncated — inject a continuation prompt
+                    continuation_count += 1;
+                    println!("\n[continuing... {continuation_count}/{MAX_CONTINUATIONS}]");
+                    self.session.add_user_message(
+                        "[System: Your response was truncated. Continue exactly from where you left off. If you were generating code, continue the code block.]"
+                    );
+                    // Continue the loop for continuation
+                }
+                _ => break,
             }
         }
 
@@ -306,6 +343,73 @@ impl TradingRuntime {
                     .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
             }
 
+            // --- File tools ---
+            "read_file" => {
+                let path = input["path"].as_str().unwrap_or("");
+                let safe_path = validate_file_path(path)?;
+                let content = std::fs::read_to_string(&safe_path).map_err(|e| {
+                    ken_tools::registry::ToolError::ExecutionFailed(format!(
+                        "Failed to read {}: {e}",
+                        safe_path.display()
+                    ))
+                })?;
+                Ok(content)
+            }
+
+            "write_file" => {
+                let path = input["path"].as_str().unwrap_or("");
+                let content = input["content"].as_str().unwrap_or("");
+                let safe_path = validate_file_path(path)?;
+                if let Some(parent) = safe_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        ken_tools::registry::ToolError::ExecutionFailed(format!(
+                            "Failed to create directory: {e}"
+                        ))
+                    })?;
+                }
+                let bytes = content.len();
+                std::fs::write(&safe_path, content).map_err(|e| {
+                    ken_tools::registry::ToolError::ExecutionFailed(format!(
+                        "Failed to write {}: {e}",
+                        safe_path.display()
+                    ))
+                })?;
+                Ok(format!(
+                    r#"{{"written": "{}", "bytes": {bytes}}}"#,
+                    safe_path.display()
+                ))
+            }
+
+            "list_files" => {
+                let directory = input["directory"].as_str().unwrap_or(".");
+                let extension = input["extension"].as_str();
+                let safe_dir = validate_file_path(directory)?;
+                let entries = std::fs::read_dir(&safe_dir).map_err(|e| {
+                    ken_tools::registry::ToolError::ExecutionFailed(format!(
+                        "Failed to list {}: {e}",
+                        safe_dir.display()
+                    ))
+                })?;
+                let mut files = Vec::new();
+                for entry in entries.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    if let Some(ext) = extension {
+                        if !name.ends_with(ext) {
+                            continue;
+                        }
+                    }
+                    let meta = entry.metadata();
+                    let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let is_dir = meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+                    files.push(serde_json::json!({
+                        "name": name,
+                        "size": size,
+                        "is_dir": is_dir,
+                    }));
+                }
+                Ok(serde_json::to_string_pretty(&files).unwrap_or_default())
+            }
+
             _ => Err(ken_tools::registry::ToolError::UnknownTool(
                 name.to_string(),
             )),
@@ -373,6 +477,97 @@ fn validate_strategy_name(name: &str) -> Result<&str, ken_tools::registry::ToolE
         ));
     }
     Ok(name)
+}
+
+/// Validate and resolve a file path, rejecting path traversal and out-of-bounds access.
+/// Allowed: paths within CWD or ~/.ken/
+fn validate_file_path(path: &str) -> Result<PathBuf, ken_tools::registry::ToolError> {
+    if path.is_empty() || path.contains('\0') {
+        return Err(ken_tools::registry::ToolError::Validation(
+            "Path must not be empty or contain null bytes".into(),
+        ));
+    }
+
+    // Reject obviously dangerous patterns before resolving
+    let sensitive = [".env", "credentials", "config.json", "id_rsa", "id_ed25519"];
+    let basename = Path::new(path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    for s in &sensitive {
+        if basename == *s {
+            return Err(ken_tools::registry::ToolError::Validation(format!(
+                "Access to sensitive file '{basename}' is not allowed"
+            )));
+        }
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let resolved = cwd.join(path);
+
+    // Canonicalize what exists — for new files, canonicalize the parent
+    let canonical = if resolved.exists() {
+        resolved
+            .canonicalize()
+            .map_err(|e| ken_tools::registry::ToolError::Validation(e.to_string()))?
+    } else if let Some(parent) = resolved.parent() {
+        if parent.exists() {
+            let canon_parent = parent
+                .canonicalize()
+                .map_err(|e| ken_tools::registry::ToolError::Validation(e.to_string()))?;
+            canon_parent.join(resolved.file_name().unwrap_or_default())
+        } else {
+            resolved.clone()
+        }
+    } else {
+        resolved.clone()
+    };
+
+    // Must be within CWD or ~/.ken/
+    let canon_cwd = cwd.canonicalize().unwrap_or(cwd);
+    let home_ken = std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".ken"))
+        .ok();
+
+    let in_cwd = canonical.starts_with(&canon_cwd);
+    let in_ken_dir = home_ken
+        .as_ref()
+        .map(|k| canonical.starts_with(k))
+        .unwrap_or(false);
+
+    if !in_cwd && !in_ken_dir {
+        return Err(ken_tools::registry::ToolError::Validation(format!(
+            "Path '{}' is outside the allowed directories",
+            path
+        )));
+    }
+
+    Ok(canonical)
+}
+
+/// Check Python dependencies at startup, warn if missing.
+fn check_python_deps() {
+    let result = std::process::Command::new("python3")
+        .args(["-c", "import ccxt; import pandas; import numpy"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match result {
+        Ok(status) if !status.success() => {
+            eprintln!(
+                "  Warning: Python dependencies not fully installed. \
+                 Tools like fetch_ohlcv and backtest_strategy may fail.\n  \
+                 Fix: pip install -r requirements.txt\n"
+            );
+        }
+        Err(_) => {
+            eprintln!(
+                "  Warning: python3 not found. Python-based tools will not work.\n"
+            );
+        }
+        _ => {}
+    }
 }
 
 fn find_python_dir() -> String {

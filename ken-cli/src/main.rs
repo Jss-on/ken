@@ -30,6 +30,10 @@ struct Cli {
     /// Show token usage at end of session
     #[arg(long, default_value_t = true)]
     show_tokens: bool,
+
+    /// Override max tokens per response (default: 16384)
+    #[arg(long)]
+    max_tokens: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -45,7 +49,10 @@ fn main() -> Result<()> {
         return run_setup_token();
     }
 
-    let config = Config::load();
+    let mut config = Config::load();
+    if let Some(max) = cli.max_tokens {
+        config.max_tokens = max;
+    }
     let sessions_dir = sessions_dir();
 
     // One-shot mode

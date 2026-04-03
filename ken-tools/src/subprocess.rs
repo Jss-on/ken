@@ -48,13 +48,52 @@ impl PythonBridge {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ToolError::SubprocessCrash(stderr.to_string()));
+            let stderr_str = stderr.to_string();
+
+            // Detect missing Python dependencies and return actionable errors
+            if let Some(module) = parse_missing_module(&stderr_str) {
+                return Err(ToolError::MissingDependency {
+                    tool: script.to_string(),
+                    dependency: module,
+                    install_hint: "pip install -r requirements.txt".to_string(),
+                });
+            }
+
+            if stderr_str.contains("FileNotFoundError") && stderr_str.contains(script) {
+                return Err(ToolError::ExecutionFailed(format!(
+                    "Python tool script not found: {script_path}. Ensure ken_tools/ directory is present."
+                )));
+            }
+
+            return Err(ToolError::SubprocessCrash(format!(
+                "Python tool '{script}' failed:\n{stderr_str}"
+            )));
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         serde_json::from_str(&stdout)
             .map_err(|e| ToolError::ExecutionFailed(format!("Failed to parse Python output: {e}")))
     }
+}
+
+/// Extract module name from `ModuleNotFoundError: No module named 'xxx'`
+fn parse_missing_module(stderr: &str) -> Option<String> {
+    for line in stderr.lines() {
+        if line.contains("ModuleNotFoundError") {
+            // Extract from: ModuleNotFoundError: No module named 'ccxt'
+            if let Some(start) = line.find('\'') {
+                let rest = &line[start + 1..];
+                if let Some(end) = rest.find('\'') {
+                    return Some(rest[..end].to_string());
+                }
+            }
+            // Fallback: extract after "named "
+            if let Some(pos) = line.find("named ") {
+                return Some(line[pos + 6..].trim().trim_matches('\'').to_string());
+            }
+        }
+    }
+    None
 }
 
 fn wait_with_timeout(

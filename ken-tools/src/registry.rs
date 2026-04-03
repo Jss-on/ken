@@ -44,6 +44,12 @@ pub enum ToolError {
     SubprocessTimeout(u64),
     #[error("Subprocess crashed: {0}")]
     SubprocessCrash(String),
+    #[error("Tool '{tool}' requires '{dependency}'. Fix: {install_hint}")]
+    MissingDependency {
+        tool: String,
+        dependency: String,
+        install_hint: String,
+    },
     #[error("Validation error: {0}")]
     Validation(String),
     #[error("Data not found: {0}")]
@@ -252,6 +258,48 @@ impl ToolRegistry {
                     "language": { "type": "string", "description": "Source language: pinescript, python, or other" }
                 },
                 "required": ["name", "code", "language"]
+            }),
+            permission: PermissionLevel::ReadOnly,
+        });
+
+        // --- File tools ---
+        self.register(ToolSpec {
+            name: "read_file".into(),
+            description: "Read a file from the local filesystem. Use this to read Pine Script files, strategy files, or any text file the trader references.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path relative to the working directory" }
+                },
+                "required": ["path"]
+            }),
+            permission: PermissionLevel::ReadOnly,
+        });
+
+        self.register(ToolSpec {
+            name: "write_file".into(),
+            description: "Write content to a file. Use this to save generated Pine Script code, strategy definitions, or analysis results.".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path relative to the working directory" },
+                    "content": { "type": "string", "description": "Content to write" }
+                },
+                "required": ["path", "content"]
+            }),
+            permission: PermissionLevel::WorkspaceWrite,
+        });
+
+        self.register(ToolSpec {
+            name: "list_files".into(),
+            description: "List files in a directory, optionally filtered by extension (e.g. '.pine', '.json').".into(),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "directory": { "type": "string", "description": "Directory path relative to working directory (default: '.')" },
+                    "extension": { "type": "string", "description": "Optional file extension filter e.g. '.pine', '.json'" }
+                },
+                "required": []
             }),
             permission: PermissionLevel::ReadOnly,
         });
