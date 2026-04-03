@@ -1,3 +1,4 @@
+use crate::auth::{self, CredentialSource};
 use crate::config::Config;
 use crate::session::Session;
 use ken_api::AnthropicClient;
@@ -45,9 +46,14 @@ pub struct TradingRuntime {
 
 impl TradingRuntime {
     pub fn new(config: Config, session: Session) -> anyhow::Result<Self> {
-        config.validate().map_err(|e| anyhow::anyhow!(e))?;
-
-        let client = AnthropicClient::new(config.api_key.clone())?.with_model(&config.model);
+        let credential = auth::resolve_credential(&config)?;
+        let api_cred = match credential.source {
+            CredentialSource::ApiKey => ApiCredential::ApiKey(credential.token),
+            CredentialSource::OAuthToken | CredentialSource::ClaudeCodeToken => {
+                ApiCredential::BearerToken(credential.token)
+            }
+        };
+        let client = AnthropicClient::new(api_cred)?.with_model(&config.model);
         let registry = ToolRegistry::new();
 
         // Locate Python tools directory relative to the binary
@@ -86,10 +92,27 @@ impl TradingRuntime {
             iterations += 1;
 
             let request = self.build_request();
-            let response = self
-                .client
-                .send(&request)
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let response = match self.client.send(&request) {
+                Ok(resp) => resp,
+                Err(ken_api::ApiError::Auth) => {
+                    // Try refreshing OAuth credentials once
+                    if let Ok(new_cred) = auth::resolve_credential(&self.config) {
+                        let api_cred = match new_cred.source {
+                            CredentialSource::ApiKey => ApiCredential::ApiKey(new_cred.token),
+                            _ => ApiCredential::BearerToken(new_cred.token),
+                        };
+                        self.client =
+                            AnthropicClient::new(api_cred)?.with_model(&self.config.model);
+                        let retry_req = self.build_request();
+                        self.client
+                            .send(&retry_req)
+                            .map_err(|e| anyhow::anyhow!("{e}"))?
+                    } else {
+                        return Err(anyhow::anyhow!(ken_api::ApiError::Auth));
+                    }
+                }
+                Err(e) => return Err(anyhow::anyhow!("{e}")),
+            };
 
             self.session
                 .track_tokens(response.input_tokens, response.output_tokens);

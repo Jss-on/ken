@@ -22,3 +22,5 @@ clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 rustyline = "15"
+anthropic-auth = { version = "0.1", features = ["blocking", "browser"] }
+url = "2"

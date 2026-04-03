@@ -9,12 +9,12 @@ const MAX_RETRIES: u32 = 2;
 
 pub struct AnthropicClient {
     client: Client,
-    api_key: String,
+    credential: ApiCredential,
     model: String,
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: String) -> Result<Self, ApiError> {
+    pub fn new(credential: ApiCredential) -> Result<Self, ApiError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -22,7 +22,7 @@ impl AnthropicClient {
 
         Ok(Self {
             client,
-            api_key,
+            credential,
             model: DEFAULT_MODEL.to_string(),
         })
     }
@@ -54,12 +54,20 @@ impl AnthropicClient {
     }
 
     fn try_send(&self, request: &ApiRequest) -> Result<AssistantResponse, ApiError> {
-        let resp = self
+        let mut req = self
             .client
             .post(API_URL)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        req = match &self.credential {
+            ApiCredential::ApiKey(key) => req.header("x-api-key", key),
+            ApiCredential::BearerToken(token) => {
+                req.header("Authorization", format!("Bearer {token}"))
+            }
+        };
+
+        let resp = req
             .json(request)
             .send()
             .map_err(|e| ApiError::Network(e.to_string()))?;

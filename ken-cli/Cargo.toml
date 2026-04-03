@@ -16,3 +16,4 @@ serde_json.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rustyline.workspace = true
+anthropic-auth.workspace = true
