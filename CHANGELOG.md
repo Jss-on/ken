@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-04-03
+
+### Features
+
+- **auth**: `ken login` / `ken logout` CLI subcommands for OAuth 2.0 PKCE authentication
+- **auth**: Support both Max (Claude Pro/Max subscription) and Console (API key creation) modes
+- **auth**: Automatic token refresh on expiry with 60-second buffer
+- **auth**: Read Claude Code credentials (`~/.claude/.credentials.json`) via `use_claude_credentials` config
+- **auth**: 401 retry with automatic credential refresh in the agentic loop
+- **api**: `ApiCredential` enum supporting both `x-api-key` and `Authorization: Bearer` headers
+- **cli**: Version string now uses `CARGO_PKG_VERSION` instead of hardcoded value
+
 ## [0.1.0] - 2026-04-03
 
 ### Features
@@ -25,5 +37,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Propagate HTTP client construction errors instead of panicking
 - Surface malformed tool JSON parse errors instead of silently defaulting to null
 
-[Unreleased]: https://github.com/Jss-on/ken/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Jss-on/ken/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Jss-on/ken/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Jss-on/ken/releases/tag/v0.1.0

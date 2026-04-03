@@ -894,7 +894,7 @@ dependencies = [
 
 [[package]]
 name = "ken"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anthropic-auth",
  "anyhow",
@@ -909,7 +909,7 @@ dependencies = [
 
 [[package]]
 name = "ken-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "reqwest",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "ken-runtime"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anthropic-auth",
  "anyhow",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "ken-tools"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",

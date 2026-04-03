@@ -64,7 +64,7 @@ fn run_chat(prompt: Option<String>, resume: Option<String>, show_tokens: bool) -
 
     let mut runtime = TradingRuntime::new(config, session)?;
 
-    println!("Ken v0.1.0 — Trading Strategy Design Agent");
+    println!("Ken v{} — Trading Strategy Design Agent", env!("CARGO_PKG_VERSION"));
     println!("Session: {}", runtime.session().id);
     println!("Type your setup description, or 'exit' to quit.\n");
 
