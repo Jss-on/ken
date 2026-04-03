@@ -14,6 +14,8 @@ pub enum CredentialSource {
     OAuthToken,
     /// OAuth access token borrowed from Claude Code
     ClaudeCodeToken,
+    /// Long-lived token from `claude setup-token`
+    SetupToken,
 }
 
 /// A resolved credential ready for API use.
@@ -124,6 +126,37 @@ fn load_ken_credentials() -> Option<OAuthCredentials> {
     serde_json::from_str(&data).ok()
 }
 
+pub fn save_setup_token(token: &str) -> anyhow::Result<()> {
+    let path = credentials_path().context("cannot determine home directory")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    // Read-modify-write to preserve any existing OAuth fields
+    let mut doc: serde_json::Value = if let Ok(data) = std::fs::read_to_string(&path) {
+        serde_json::from_str(&data).unwrap_or(serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    doc["setup_token"] = serde_json::Value::String(token.to_string());
+    std::fs::write(&path, serde_json::to_string_pretty(&doc)?)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
+fn load_setup_token() -> Option<String> {
+    let path = credentials_path()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&data).ok()?;
+    doc["setup_token"].as_str().map(|s| s.to_string())
+}
+
 fn load_claude_credentials() -> Option<OAuthCredentials> {
     let path = claude_credentials_path()?;
     let data = std::fs::read_to_string(path).ok()?;
@@ -200,7 +233,15 @@ pub fn resolve_credential(config: &Config) -> anyhow::Result<ResolvedCredential>
         });
     }
 
-    // 3. Claude Code credentials (opt-in)
+    // 3. Setup token (from `claude setup-token`)
+    if let Some(token) = load_setup_token() {
+        return Ok(ResolvedCredential {
+            token,
+            source: CredentialSource::SetupToken,
+        });
+    }
+
+    // 4. Claude Code credentials (opt-in)
     if config.use_claude_credentials
         && let Some(creds) = load_claude_credentials()
     {
@@ -214,8 +255,7 @@ pub fn resolve_credential(config: &Config) -> anyhow::Result<ResolvedCredential>
     bail!(
         "No credentials found.\n\n\
          Quick setup:\n  \
-         ken login              # authenticate with Claude Pro/Max\n  \
-         ken login --console    # authenticate via Anthropic Console\n  \
+         ken setup-token        # paste a token from `claude setup-token`\n  \
          export KEN_API_KEY=... # or set API key directly\n  \
          # or create ~/.ken/config.json with {{\"api_key\": \"...\"}}"
     )
@@ -250,10 +290,10 @@ pub fn run_login(mode: OAuthMode) -> anyhow::Result<()> {
         eprintln!("Please open the URL above manually.");
     }
 
-    // Wait for the callback on localhost:1455
-    let callback_data = wait_for_callback()?;
+    // Wait for callback OR manual code paste (for headless/remote servers)
+    let callback_data = wait_for_callback_or_paste()?;
 
-    eprintln!("[ken] Exchanging authorization code...");
+    eprintln!("\n[ken] Exchanging authorization code...");
     let tokens = oauth
         .exchange_code(&callback_data, &flow.state, &flow.verifier)
         .map_err(|e| anyhow::anyhow!("token exchange failed: {e}"))?;
@@ -281,12 +321,43 @@ pub fn run_logout() -> anyhow::Result<()> {
 // Local callback server (sync, no tokio needed)
 // ---------------------------------------------------------------------------
 
+/// Race two input methods: TCP callback (for local browser) and stdin paste (for headless servers).
+fn wait_for_callback_or_paste() -> anyhow::Result<String> {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+
+    // Thread 1: TCP callback listener
+    let tx_tcp = tx.clone();
+    std::thread::spawn(move || {
+        if let Ok(code) = wait_for_tcp_callback() {
+            let _ = tx_tcp.send(code);
+        }
+    });
+
+    // Thread 2: Manual paste from stdin
+    let tx_paste = tx.clone();
+    std::thread::spawn(move || {
+        let mut input = String::new();
+        if std::io::stdin().read_line(&mut input).is_ok() {
+            let trimmed = input.trim().to_string();
+            if !trimmed.is_empty() {
+                // Handle pasted URL or raw code
+                let code = parse_pasted_input(&trimmed).unwrap_or(trimmed);
+                let _ = tx_paste.send(code);
+            }
+        }
+    });
+
+    drop(tx);
+    rx.recv().context("No authorization received — both callback and stdin closed")
+}
+
 /// Listen on localhost:1455 for the OAuth redirect and extract the code+state.
-fn wait_for_callback() -> anyhow::Result<String> {
+fn wait_for_tcp_callback() -> anyhow::Result<String> {
     let listener = std::net::TcpListener::bind("127.0.0.1:1455")
         .context("Failed to bind localhost:1455 for OAuth callback")?;
 
-    eprintln!("Waiting for authorization (listening on http://localhost:1455/callback)...");
+    eprintln!("Waiting for authorization...");
+    eprintln!("  Paste the authorization code below, or wait for browser callback:\n");
 
     let (stream, _) = listener.accept().context("Failed to accept callback")?;
     let mut reader = std::io::BufReader::new(&stream);
@@ -316,6 +387,29 @@ fn wait_for_callback() -> anyhow::Result<String> {
     writer.flush()?;
 
     Ok(code_with_state)
+}
+
+/// Parse a pasted input — could be a full callback URL, just a code, or code#state.
+fn parse_pasted_input(input: &str) -> Option<String> {
+    // If it looks like a URL with query params, extract code and state
+    if input.starts_with("http")
+        && let Ok(url) = url::Url::parse(input)
+    {
+        let code = url
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.to_string())?;
+        let state = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string());
+        return Some(match state {
+            Some(s) => format!("{code}#{s}"),
+            None => code,
+        });
+    }
+    // Otherwise treat as raw code (or code#state) — return None to use as-is
+    None
 }
 
 /// Extract the code#state from a callback URL in an HTTP request line.
@@ -383,9 +477,45 @@ mod tests {
 
     #[test]
     fn credential_empty_api_key_no_oauth_fails() {
+        // Skip if credentials exist on disk (e.g. developer machine with OAuth tokens)
+        if credentials_path().is_some_and(|p| p.exists()) {
+            return;
+        }
         let config = Config::default();
         let result = resolve_credential(&config);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_pasted_url_with_code_and_state() {
+        let input = "https://console.anthropic.com/oauth/code/callback?code=abc123&state=xyz789";
+        let result = parse_pasted_input(input).unwrap();
+        assert_eq!(result, "abc123#xyz789");
+    }
+
+    #[test]
+    fn parse_pasted_url_with_code_only() {
+        let input = "https://console.anthropic.com/oauth/code/callback?code=abc123";
+        let result = parse_pasted_input(input).unwrap();
+        assert_eq!(result, "abc123");
+    }
+
+    #[test]
+    fn parse_pasted_raw_code_returns_none() {
+        let input = "abc123";
+        assert!(parse_pasted_input(input).is_none());
+    }
+
+    #[test]
+    fn resolve_credential_prefers_api_key_over_setup_token() {
+        let config = Config {
+            api_key: "sk-test-key".to_string(),
+            ..Config::default()
+        };
+        // Even if a setup token file existed, api_key wins
+        let cred = resolve_credential(&config).unwrap();
+        assert_eq!(cred.source, CredentialSource::ApiKey);
+        assert_eq!(cred.token, "sk-test-key");
     }
 
     #[test]

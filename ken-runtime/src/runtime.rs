@@ -49,9 +49,9 @@ impl TradingRuntime {
         let credential = auth::resolve_credential(&config)?;
         let api_cred = match credential.source {
             CredentialSource::ApiKey => ApiCredential::ApiKey(credential.token),
-            CredentialSource::OAuthToken | CredentialSource::ClaudeCodeToken => {
-                ApiCredential::BearerToken(credential.token)
-            }
+            CredentialSource::OAuthToken
+            | CredentialSource::ClaudeCodeToken
+            | CredentialSource::SetupToken => ApiCredential::BearerToken(credential.token),
         };
         let client = AnthropicClient::new(api_cred)?.with_model(&config.model);
         let registry = ToolRegistry::new();
