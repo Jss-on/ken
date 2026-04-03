@@ -1,11 +1,39 @@
 use serde::{Deserialize, Serialize};
 
+/// Cache control marker for prompt caching.
+/// Cache reads are ~10x cheaper than normal input tokens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheControl {
+    #[serde(rename = "type")]
+    pub control_type: String,
+}
+
+impl CacheControl {
+    pub fn ephemeral() -> Self {
+        Self {
+            control_type: "ephemeral".to_string(),
+        }
+    }
+}
+
+/// A system prompt block (supports cache_control)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemBlock {
+    #[serde(rename = "type")]
+    pub block_type: String,
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
+}
+
 /// Tool definition sent to the API
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub input_schema: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_control: Option<CacheControl>,
 }
 
 /// A message in the conversation
@@ -27,12 +55,18 @@ pub enum Role {
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
-    Text { text: String },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
+    },
     #[serde(rename = "tool_use")]
     ToolUse {
         id: String,
         name: String,
         input: serde_json::Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
     #[serde(rename = "tool_result")]
     ToolResult {
@@ -40,6 +74,8 @@ pub enum ContentBlock {
         content: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         is_error: Option<bool>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControl>,
     },
 }
 
@@ -48,7 +84,7 @@ pub enum ContentBlock {
 pub struct ApiRequest {
     pub model: String,
     pub max_tokens: u32,
-    pub system: String,
+    pub system: Vec<SystemBlock>,
     pub messages: Vec<Message>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<ToolDefinition>>,
@@ -76,6 +112,10 @@ pub struct AssistantResponse {
     pub stop_reason: StopReason,
     pub input_tokens: u32,
     pub output_tokens: u32,
+    /// Tokens read from cache (10x cheaper than input)
+    pub cache_read_input_tokens: u32,
+    /// Tokens written to cache (1.25x input cost, amortized over reads)
+    pub cache_creation_input_tokens: u32,
 }
 
 #[derive(Debug, Clone)]

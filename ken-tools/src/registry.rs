@@ -23,6 +23,7 @@ impl ToolSpec {
             name: self.name.clone(),
             description: self.description.clone(),
             input_schema: self.input_schema.clone(),
+            cache_control: None,
         }
     }
 }

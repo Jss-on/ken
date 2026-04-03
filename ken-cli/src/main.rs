@@ -52,8 +52,9 @@ fn main() -> Result<()> {
     if let Some(ref prompt) = cli.prompt {
         let session = Session::new();
         let mut runtime = TradingRuntime::new(config, session)?;
-        let response = runtime.run_turn(prompt)?;
-        println!("{response}");
+        let _response = runtime.run_turn(prompt)?;
+        // Text already printed during streaming
+        println!();
         runtime.session().save(&sessions_dir)?;
         return Ok(());
     }
@@ -140,10 +141,10 @@ fn repl(runtime: &mut TradingRuntime) -> Result<()> {
                 }
 
                 match runtime.run_turn(input) {
-                    Ok(response) => {
-                        if !response.is_empty() {
-                            println!("\n{response}\n");
-                        }
+                    Ok(_response) => {
+                        // Text is already printed in real-time during SSE streaming
+                        // (via eprint! in client.rs), so we just print a newline separator.
+                        println!();
                     }
                     Err(e) => {
                         eprintln!("\n  Error: {e}\n");
@@ -185,9 +186,14 @@ fn handle_command(input: &str, runtime: &TradingRuntime) {
             println!("  Input tokens:   {}", s.total_input_tokens);
             println!("  Output tokens:  {}", s.total_output_tokens);
             println!(
-                "  Total tokens:   {}\n",
+                "  Total tokens:   {}",
                 s.total_input_tokens + s.total_output_tokens
             );
+            if s.total_cache_read_tokens > 0 || s.total_cache_creation_tokens > 0 {
+                println!("  Cache read:     {} (10x cheaper)", s.total_cache_read_tokens);
+                println!("  Cache write:    {}", s.total_cache_creation_tokens);
+            }
+            println!();
         }
         _ => {
             println!("\n  Unknown command: {input}");
@@ -274,6 +280,12 @@ fn save_and_report(
                 "\n  Session stats: {} input + {} output = {} tokens",
                 s.total_input_tokens, s.total_output_tokens, total
             );
+            if s.total_cache_read_tokens > 0 || s.total_cache_creation_tokens > 0 {
+                println!(
+                    "  Cache stats:   {} read (10x cheaper) + {} written",
+                    s.total_cache_read_tokens, s.total_cache_creation_tokens
+                );
+            }
         }
     }
 

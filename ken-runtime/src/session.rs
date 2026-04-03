@@ -13,6 +13,11 @@ pub struct Session {
     /// Token usage tracking
     pub total_input_tokens: u32,
     pub total_output_tokens: u32,
+    /// Cache usage tracking (prompt caching)
+    #[serde(default)]
+    pub total_cache_read_tokens: u32,
+    #[serde(default)]
+    pub total_cache_creation_tokens: u32,
 }
 
 impl Session {
@@ -24,6 +29,8 @@ impl Session {
             active_strategy_id: None,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_read_tokens: 0,
+            total_cache_creation_tokens: 0,
         }
     }
 
@@ -32,6 +39,7 @@ impl Session {
             role: Role::User,
             content: vec![ContentBlock::Text {
                 text: text.to_string(),
+                cache_control: None,
             }],
         });
     }
@@ -41,6 +49,7 @@ impl Session {
         if !text.is_empty() {
             content.push(ContentBlock::Text {
                 text: text.to_string(),
+                cache_control: None,
             });
         }
         content.extend(tool_calls);
@@ -57,6 +66,7 @@ impl Session {
                 tool_use_id: tool_use_id.to_string(),
                 content: result.to_string(),
                 is_error: if is_error { Some(true) } else { None },
+                cache_control: None,
             }],
         });
     }
@@ -64,6 +74,11 @@ impl Session {
     pub fn track_tokens(&mut self, input: u32, output: u32) {
         self.total_input_tokens += input;
         self.total_output_tokens += output;
+    }
+
+    pub fn track_cache_tokens(&mut self, cache_read: u32, cache_creation: u32) {
+        self.total_cache_read_tokens += cache_read;
+        self.total_cache_creation_tokens += cache_creation;
     }
 
     /// Save session to JSONL file

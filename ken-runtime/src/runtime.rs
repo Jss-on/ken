@@ -5,6 +5,11 @@ use ken_api::AnthropicClient;
 use ken_api::types::*;
 use ken_tools::{PythonBridge, ToolExecutor, ToolRegistry};
 
+/// Number of most-recent tool results to keep intact; older ones get cleared.
+const MICROCOMPACT_KEEP_RECENT: usize = 4;
+/// Placeholder for cleared tool results.
+const CLEARED_TOOL_RESULT: &str = "[Old tool result cleared to reduce context size]";
+
 const SYSTEM_PROMPT: &str = r#"You are Ken, a trading strategy design agent. Your job is to help traders formalize their intuitions into systematic trading strategies.
 
 You help with:
@@ -93,6 +98,10 @@ impl TradingRuntime {
 
             self.session
                 .track_tokens(response.input_tokens, response.output_tokens);
+            self.session.track_cache_tokens(
+                response.cache_read_input_tokens,
+                response.cache_creation_input_tokens,
+            );
 
             // Build assistant content blocks for session
             let mut tool_blocks = Vec::new();
@@ -101,6 +110,7 @@ impl TradingRuntime {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
                     input: tc.input.clone(),
+                    cache_control: None,
                 });
             }
             self.session
@@ -133,21 +143,94 @@ impl TradingRuntime {
     }
 
     fn build_request(&self) -> ApiRequest {
-        let mut system = SYSTEM_PROMPT.to_string();
+        let mut system_text = SYSTEM_PROMPT.to_string();
 
         // Add active strategy context if loaded
         if let Some(ref strategy_id) = self.session.active_strategy_id {
-            system.push_str(&format!("\n\nActive strategy: {strategy_id}"));
+            system_text.push_str(&format!("\n\nActive strategy: {strategy_id}"));
         }
+
+        // System prompt as blocks with cache_control — the system prompt is
+        // stable across turns, so caching it saves ~90% on those tokens.
+        let system = vec![SystemBlock {
+            block_type: "text".to_string(),
+            text: system_text,
+            cache_control: Some(CacheControl::ephemeral()),
+        }];
+
+        // Tool definitions with cache_control on the last tool —
+        // tools are stable across turns, so they should be cached too.
+        let mut tools = self.registry.api_definitions();
+        if let Some(last) = tools.last_mut() {
+            last.cache_control = Some(CacheControl::ephemeral());
+        }
+
+        // Prepare messages with cache breakpoints and microcompact
+        let messages = self.prepare_messages();
 
         ApiRequest {
             model: self.config.model.clone(),
             max_tokens: self.config.max_tokens,
             system,
-            messages: self.session.messages.clone(),
-            tools: Some(self.registry.api_definitions()),
+            messages,
+            tools: Some(tools),
             stream: true,
         }
+    }
+
+    /// Prepare messages for the API call:
+    /// 1. Clear old tool results (microcompact) to reduce context size
+    /// 2. Add cache breakpoints on the last user message
+    fn prepare_messages(&self) -> Vec<Message> {
+        let mut messages = self.session.messages.clone();
+
+        // --- Microcompact: clear old tool results ---
+        // Find all ToolResult block indices, keep only the N most recent
+        let tool_result_indices: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                m.content
+                    .iter()
+                    .any(|b| matches!(b, ContentBlock::ToolResult { .. }))
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        if tool_result_indices.len() > MICROCOMPACT_KEEP_RECENT {
+            let clear_count = tool_result_indices.len() - MICROCOMPACT_KEEP_RECENT;
+            for &idx in &tool_result_indices[..clear_count] {
+                for block in &mut messages[idx].content {
+                    if let ContentBlock::ToolResult { content, .. } = block {
+                        if content.len() > CLEARED_TOOL_RESULT.len() {
+                            *content = CLEARED_TOOL_RESULT.to_string();
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Cache breakpoints: mark the last user message ---
+        // This creates a cache boundary so the prefix (system + tools + history)
+        // is cached and only the new user message causes a cache write.
+        if let Some(last_user_idx) = messages
+            .iter()
+            .rposition(|m| matches!(m.role, Role::User))
+        {
+            if let Some(last_block) = messages[last_user_idx].content.last_mut() {
+                match last_block {
+                    ContentBlock::Text { cache_control, .. }
+                    | ContentBlock::ToolResult { cache_control, .. } => {
+                        *cache_control = Some(CacheControl::ephemeral());
+                    }
+                    ContentBlock::ToolUse { cache_control, .. } => {
+                        *cache_control = Some(CacheControl::ephemeral());
+                    }
+                }
+            }
+        }
+
+        messages
     }
 
     fn execute_tool(
@@ -170,17 +253,15 @@ impl TradingRuntime {
                 Ok(serde_json::to_string_pretty(&result).unwrap_or_default())
             }
 
-            // LLM-reasoning tools — the LLM itself produces the output as structured JSON.
-            // We just pass the input through as a "done" acknowledgment so the LLM
-            // knows the tool was "executed" and can use the result in its next response.
+            // LLM-reasoning tools — the LLM itself produces the output in its text response.
+            // Return a short acknowledgment so the LLM knows the tool was "executed"
+            // without echoing the full input (which causes it to repeat itself).
             "describe_setup"
             | "propose_entry_rules"
             | "propose_sl_tp"
             | "generate_pine"
             | "register_indicator" => {
-                // These tools are handled by the LLM's own reasoning.
-                // Return the input as confirmation that the tool "executed".
-                Ok(serde_json::to_string_pretty(input).unwrap_or_default())
+                Ok(format!(r#"{{"status": "ok", "tool": "{name}", "message": "Acknowledged. Continue with your analysis."}}"#))
             }
 
             "lint_pine" => {

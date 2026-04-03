@@ -101,6 +101,8 @@ impl AnthropicClient {
         let mut current_tool_name = String::new();
         let mut input_tokens = 0u32;
         let mut output_tokens = 0u32;
+        let mut cache_read_input_tokens = 0u32;
+        let mut cache_creation_input_tokens = 0u32;
         let mut stop_reason = StopReason::EndTurn;
 
         for line in reader.lines() {
@@ -124,6 +126,14 @@ impl AnthropicClient {
                             .get("input_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as u32;
+                        cache_read_input_tokens = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
+                        cache_creation_input_tokens = usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0) as u32;
                     }
                 }
                 Some("content_block_start") => {
@@ -142,7 +152,9 @@ impl AnthropicClient {
                 Some("content_block_delta") => {
                     if let Some(txt) = event["delta"]["text"].as_str() {
                         text.push_str(txt);
-                        eprint!("{txt}");
+                        print!("{txt}");
+                        use std::io::Write;
+                        let _ = std::io::stdout().flush();
                     }
                     if let Some(json_chunk) = event["delta"]["partial_json"].as_str() {
                         current_tool_json.push_str(json_chunk);
@@ -173,12 +185,21 @@ impl AnthropicClient {
                             .get("output_tokens")
                             .and_then(|v| v.as_u64())
                             .unwrap_or(0) as u32;
+                        // message_delta may also carry cache stats
+                        if let Some(v) = usage.get("cache_read_input_tokens") {
+                            cache_read_input_tokens =
+                                v.as_u64().unwrap_or(0) as u32;
+                        }
+                        if let Some(v) = usage.get("cache_creation_input_tokens") {
+                            cache_creation_input_tokens =
+                                v.as_u64().unwrap_or(0) as u32;
+                        }
                     }
                 }
                 _ => {}
             }
         }
-        eprintln!();
+        println!();
 
         Ok(AssistantResponse {
             text,
@@ -186,6 +207,8 @@ impl AnthropicClient {
             stop_reason,
             input_tokens,
             output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
         })
     }
 
@@ -221,6 +244,12 @@ impl AnthropicClient {
 
         let input_tokens = body["usage"]["input_tokens"].as_u64().unwrap_or(0) as u32;
         let output_tokens = body["usage"]["output_tokens"].as_u64().unwrap_or(0) as u32;
+        let cache_read_input_tokens = body["usage"]["cache_read_input_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
+        let cache_creation_input_tokens = body["usage"]["cache_creation_input_tokens"]
+            .as_u64()
+            .unwrap_or(0) as u32;
 
         Ok(AssistantResponse {
             text,
@@ -228,6 +257,8 @@ impl AnthropicClient {
             stop_reason,
             input_tokens,
             output_tokens,
+            cache_read_input_tokens,
+            cache_creation_input_tokens,
         })
     }
 
