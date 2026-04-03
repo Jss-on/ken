@@ -9,12 +9,12 @@ const MAX_RETRIES: u32 = 2;
 
 pub struct AnthropicClient {
     client: Client,
-    api_key: String,
+    credential: ApiCredential,
     model: String,
 }
 
 impl AnthropicClient {
-    pub fn new(api_key: String) -> Result<Self, ApiError> {
+    pub fn new(credential: ApiCredential) -> Result<Self, ApiError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -22,7 +22,7 @@ impl AnthropicClient {
 
         Ok(Self {
             client,
-            api_key,
+            credential,
             model: DEFAULT_MODEL.to_string(),
         })
     }
@@ -54,18 +54,33 @@ impl AnthropicClient {
     }
 
     fn try_send(&self, request: &ApiRequest) -> Result<AssistantResponse, ApiError> {
-        let resp = self
+        let mut req = self
             .client
             .post(API_URL)
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        req = match &self.credential {
+            ApiCredential::ApiKey(key) => req.header("x-api-key", key),
+            ApiCredential::BearerToken(token) => {
+                req.header("Authorization", format!("Bearer {token}"))
+            }
+        };
+
+        let resp = req
             .json(request)
             .send()
             .map_err(|e| ApiError::Network(e.to_string()))?;
 
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
+            let body = resp.text().unwrap_or_default();
+            // Surface the actual error message from the API
+            if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&body)
+                && let Some(msg) = err_json["error"]["message"].as_str()
+            {
+                return Err(ApiError::Network(format!("401 Unauthorized: {msg}")));
+            }
             return Err(ApiError::Auth);
         }
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -228,5 +243,50 @@ impl AnthropicClient {
 
     pub fn model(&self) -> &str {
         &self.model
+    }
+
+    /// Make a minimal API call to verify that a credential is accepted.
+    /// Returns `Ok(())` on success, or a descriptive error on failure.
+    pub fn validate_credential(credential: &ApiCredential) -> Result<(), ApiError> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .map_err(|e| ApiError::Network(format!("failed to build HTTP client: {e}")))?;
+
+        let mut req = client
+            .post(API_URL)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+
+        req = match credential {
+            ApiCredential::ApiKey(key) => req.header("x-api-key", key),
+            ApiCredential::BearerToken(token) => {
+                req.header("Authorization", format!("Bearer {token}"))
+            }
+        };
+
+        let body = serde_json::json!({
+            "model": "claude-haiku-4-5-20251001",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+
+        let resp = req
+            .json(&body)
+            .send()
+            .map_err(|e| ApiError::Network(e.to_string()))?;
+
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(());
+        }
+
+        let resp_body = resp.text().unwrap_or_default();
+        if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&resp_body)
+            && let Some(msg) = err_json["error"]["message"].as_str()
+        {
+            return Err(ApiError::Network(format!("HTTP {status}: {msg}")));
+        }
+        Err(ApiError::Network(format!("HTTP {status}: {resp_body}")))
     }
 }
