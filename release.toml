@@ -1,0 +1,32 @@
+# cargo-release configuration
+# https://github.com/crate-ci/cargo-release
+
+[workspace]
+# All crates share a single version via workspace.package.version
+allow-branch = ["main"]
+consolidate-commits = true
+push-remote = "origin"
+sign-commit = false
+sign-tag = false
+
+pre-release-commit-message = "chore: release v{{version}}"
+tag-message = "v{{version}}"
+tag-prefix = ""
+tag-name = "v{{version}}"
+
+pre-release-replacements = [
+  { file = "CHANGELOG.md", search = "## \\[Unreleased\\]", replace = "## [Unreleased]\n\n## [{{version}}] - {{date}}", exactly = 1 },
+]
+
+# Publish order (dependencies first)
+[[package]]
+name = "ken-api"
+
+[[package]]
+name = "ken-tools"
+
+[[package]]
+name = "ken-runtime"
+
+[[package]]
+name = "ken"

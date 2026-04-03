@@ -8,8 +8,47 @@ permissions:
   contents: write
 
 jobs:
+  validate:
+    name: Validate Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      prerelease: ${{ steps.meta.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version metadata
+        id: meta
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+
+          # Detect pre-release: alpha, beta, rc
+          if echo "$TAG" | grep -qE '-(alpha|beta|rc)'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "Tag: v$TAG (prerelease=${{ steps.meta.outputs.prerelease || 'false' }})"
+
+      - name: Verify tag matches Cargo.toml
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          CARGO_VER=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          if [ "$TAG" != "$CARGO_VER" ]; then
+            echo "::error::Tag v$TAG does not match Cargo.toml version $CARGO_VER"
+            exit 1
+          fi
+
+  test:
+    name: Test Gate
+    needs: validate
+    uses: ./.github/workflows/ci.yml
+
   build:
     name: Build ${{ matrix.artifact }}
+    needs: [validate, test]
     strategy:
       matrix:
         include:
@@ -27,6 +66,15 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-${{ matrix.target }}-
+
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -36,25 +84,47 @@ jobs:
           cp target/${{ matrix.target }}/release/ken dist/${{ matrix.artifact }}
           cp -r ken_tools dist/
           cp pyproject.toml dist/
+          cp CHANGELOG.md dist/
           tar czf ${{ matrix.artifact }}.tar.gz -C dist .
 
-      - name: Upload
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.tar.gz
 
   publish:
     name: Create GitHub Release
-    needs: build
+    needs: [validate, build]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          # Use git-cliff if available, else fall back to GitHub auto-notes
+          if command -v git-cliff >/dev/null 2>&1; then
+            git-cliff --latest --strip header > RELEASE_NOTES.md
+          else
+            # Extract current version section from CHANGELOG.md
+            VERSION="${{ needs.validate.outputs.version }}"
+            sed -n "/^## \[$VERSION\]/,/^## \[/p" CHANGELOG.md | head -n -1 > RELEASE_NOTES.md
+          fi
+
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "See [CHANGELOG.md](CHANGELOG.md) for details." > RELEASE_NOTES.md
+          fi
 
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: "*.tar.gz"
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
+          prerelease: ${{ needs.validate.outputs.prerelease == 'true' }}
+          generate_release_notes: false
