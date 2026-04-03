@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use ken_api::{AnthropicClient, ApiCredential};
-use ken_runtime::{Config, Session, TradingRuntime, auth};
+use ken_api::AnthropicClient;
+use ken_runtime::{Config, Session, TradingRuntime};
 use rustyline::DefaultEditor;
 use std::path::PathBuf;
 
@@ -34,44 +34,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Set up a long-lived API token (from `claude setup-token`)
+    /// Set up your Anthropic API key
     SetupToken,
-
-    /// Authenticate via OAuth (experimental)
-    Login {
-        /// Use Anthropic Console OAuth instead of Claude Pro/Max
-        #[arg(long)]
-        console: bool,
-    },
-
-    /// Clear stored OAuth credentials
-    Logout,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // Handle subcommands first
-    if let Some(cmd) = cli.command {
-        return match cmd {
-            Command::SetupToken => run_setup_token(),
-            Command::Login { console } => {
-                let mode = if console {
-                    anthropic_auth::OAuthMode::Console
-                } else {
-                    anthropic_auth::OAuthMode::Max
-                };
-                auth::run_login(mode)
-            }
-            Command::Logout => auth::run_logout(),
-        };
+    if let Some(Command::SetupToken) = cli.command {
+        return run_setup_token();
     }
 
-    // Default: REPL / one-shot mode
     let config = Config::load();
     let sessions_dir = sessions_dir();
 
-    // One-shot mode: skip banner, resolve creds, run, done
+    // One-shot mode
     if let Some(ref prompt) = cli.prompt {
         let session = Session::new();
         let mut runtime = TradingRuntime::new(config, session)?;
@@ -92,12 +69,14 @@ fn main() -> Result<()> {
         Session::new()
     };
 
-    // Check if we have credentials before entering the REPL
-    if config.api_key.is_empty() && !has_any_credentials(&config) {
-        println!("\n  No credentials found. Let's get you set up.\n");
-        run_interactive_login()?;
-        // Reload config in case login created something
+    if config.api_key.is_empty() {
+        println!("\n  No API key found. Let's get you set up.\n");
+        run_setup_token()?;
         let config = Config::load();
+        if config.api_key.is_empty() {
+            println!("  No key configured. Set KEN_API_KEY or run `ken setup-token` later.\n");
+            return Ok(());
+        }
         let mut runtime = TradingRuntime::new(config, session)?;
         println!("\n  Session: {}\n", runtime.session().id);
         print_help_hint();
@@ -125,7 +104,6 @@ fn print_banner() {
 fn print_help_hint() {
     println!("  Type a trading setup, or try these commands:");
     println!("    /apikey         set or update your API key");
-    println!("    /setup-token    paste a token from `claude setup-token`");
     println!("    /session        show current session info");
     println!("    /help           show all commands");
     println!("    exit            quit\n");
@@ -134,10 +112,6 @@ fn print_help_hint() {
 fn print_commands() {
     println!("\n  Commands:");
     println!("    /apikey             set or update your Anthropic API key");
-    println!("    /setup-token        paste a token from `claude setup-token`");
-    println!("    /login              authenticate via OAuth (experimental)");
-    println!("    /login console      authenticate via Anthropic Console OAuth");
-    println!("    /logout             clear stored OAuth credentials");
     println!("    /session            show current session ID and token usage");
     println!("    /help               show this help");
     println!("    exit | quit         save session and quit\n");
@@ -160,7 +134,6 @@ fn repl(runtime: &mut TradingRuntime) -> Result<()> {
 
                 let _ = rl.add_history_entry(input);
 
-                // Handle slash commands
                 if input.starts_with('/') {
                     handle_command(input, runtime);
                     continue;
@@ -198,30 +171,10 @@ fn handle_command(input: &str, runtime: &TradingRuntime) {
     match parts.first().copied() {
         Some("/help") => print_commands(),
         Some("/apikey") => {
-            if let Err(e) = prompt_api_key() {
+            if let Err(e) = run_setup_token() {
                 eprintln!("\n  Failed to save API key: {e}\n");
             } else {
-                println!("\n  Restart Ken to use the new key.\n");
-            }
-        }
-        Some("/setup-token") => {
-            if let Err(e) = run_setup_token() {
-                eprintln!("\n  Setup token failed: {e}\n");
-            }
-        }
-        Some("/login") => {
-            let mode = if parts.get(1) == Some(&"console") {
-                anthropic_auth::OAuthMode::Console
-            } else {
-                anthropic_auth::OAuthMode::Max
-            };
-            if let Err(e) = auth::run_login(mode) {
-                eprintln!("\n  Login failed: {e}\n");
-            }
-        }
-        Some("/logout") => {
-            if let Err(e) = auth::run_logout() {
-                eprintln!("\n  Logout failed: {e}\n");
+                println!("  Restart Ken to use the new key.\n");
             }
         }
         Some("/session") => {
@@ -244,101 +197,7 @@ fn handle_command(input: &str, runtime: &TradingRuntime) {
 }
 
 fn run_setup_token() -> Result<()> {
-    println!("\n  Paste a long-lived API token.");
-    println!("  You can get one by running: claude setup-token");
-    println!("  Or use an API key from: https://console.anthropic.com/settings/keys\n");
-
-    let mut rl = DefaultEditor::new()?;
-    let readline = rl.readline("  Token: ");
-    match readline {
-        Ok(line) => {
-            let token = line.trim().to_string();
-            if token.is_empty() {
-                println!("  No token entered. Skipping.");
-                return Ok(());
-            }
-
-            // Determine credential type: API keys start with "sk-ant-"
-            let credential = if token.starts_with("sk-ant-api") || token.starts_with("sk-") {
-                ApiCredential::ApiKey(token.clone())
-            } else {
-                ApiCredential::BearerToken(token.clone())
-            };
-
-            // Validate with a test API call
-            print!("  Validating token... ");
-            match AnthropicClient::validate_credential(&credential) {
-                Ok(()) => {
-                    println!("valid!\n");
-                }
-                Err(e) => {
-                    println!("failed.\n");
-                    let err_msg = e.to_string();
-                    eprintln!("  Warning: {err_msg}\n");
-
-                    // Ask whether to save anyway
-                    let save_anyway = rl.readline("  Save anyway? [y/N]: ");
-                    match save_anyway {
-                        Ok(answer) if answer.trim().eq_ignore_ascii_case("y") => {}
-                        _ => {
-                            println!("  Token not saved.");
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-
-            // Save based on credential type
-            match &credential {
-                ApiCredential::ApiKey(_) => {
-                    save_api_key(&token)?;
-                    println!("  API key saved to ~/.ken/config.json");
-                }
-                ApiCredential::BearerToken(_) => {
-                    auth::save_setup_token(&token)?;
-                    println!("  Token saved to ~/.ken/credentials.json");
-                }
-            }
-
-            println!("  Restart Ken to use the new credentials.\n");
-            Ok(())
-        }
-        Err(_) => Ok(()),
-    }
-}
-
-fn run_interactive_login() -> Result<()> {
-    println!("  Set up API access:\n");
-    println!("    1) Paste a token (from `claude setup-token` or an API key)");
-    println!("    2) Enter API key manually");
-    println!("    3) Claude Pro/Max OAuth (experimental)");
-    println!("    4) Anthropic Console OAuth (experimental)");
-    println!("    5) Skip\n");
-
-    let mut rl = DefaultEditor::new()?;
-    loop {
-        let readline = rl.readline("  Choice [1/2/3/4/5]: ");
-        match readline {
-            Ok(line) => match line.trim() {
-                "1" => return run_setup_token(),
-                "2" => return prompt_api_key(),
-                "3" => return auth::run_login(anthropic_auth::OAuthMode::Max),
-                "4" => return auth::run_login(anthropic_auth::OAuthMode::Console),
-                "5" => {
-                    println!(
-                        "\n  Skipped. Run `ken setup-token` or set KEN_API_KEY later.\n"
-                    );
-                    return Ok(());
-                }
-                _ => println!("  Please enter 1, 2, 3, 4, or 5."),
-            },
-            Err(_) => return Ok(()),
-        }
-    }
-}
-
-fn prompt_api_key() -> Result<()> {
-    println!("\n  Get your API key from: https://console.anthropic.com/settings/keys\n");
+    println!("  Get your API key from: https://console.anthropic.com/settings/keys\n");
 
     let mut rl = DefaultEditor::new()?;
     let readline = rl.readline("  API key: ");
@@ -348,6 +207,25 @@ fn prompt_api_key() -> Result<()> {
             if key.is_empty() {
                 println!("  No key entered. Skipping.");
                 return Ok(());
+            }
+
+            // Validate
+            print!("  Validating... ");
+            match AnthropicClient::validate_api_key(&key) {
+                Ok(()) => println!("valid!\n"),
+                Err(e) => {
+                    println!("failed.\n");
+                    eprintln!("  Warning: {e}\n");
+
+                    let save_anyway = rl.readline("  Save anyway? [y/N]: ");
+                    match save_anyway {
+                        Ok(answer) if answer.trim().eq_ignore_ascii_case("y") => {}
+                        _ => {
+                            println!("  Key not saved.");
+                            return Ok(());
+                        }
+                    }
+                }
             }
 
             save_api_key(&key)?;
@@ -364,7 +242,6 @@ fn save_api_key(key: &str) -> Result<()> {
     std::fs::create_dir_all(&ken_dir)?;
     let config_path = ken_dir.join("config.json");
 
-    // Load existing config or create new
     let mut config: serde_json::Value = if let Ok(data) = std::fs::read_to_string(&config_path) {
         serde_json::from_str(&data).unwrap_or(serde_json::json!({}))
     } else {
@@ -380,27 +257,6 @@ fn save_api_key(key: &str) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn has_any_credentials(config: &Config) -> bool {
-    // Check Ken credentials file (OAuth or setup token)
-    let home = std::env::var("HOME").ok();
-    if let Some(ref h) = home {
-        let ken_creds = PathBuf::from(h).join(".ken").join("credentials.json");
-        if ken_creds.exists() {
-            return true;
-        }
-    }
-    // Check Claude Code credentials if opted in
-    if config.use_claude_credentials
-        && let Some(ref h) = home
-    {
-        let claude_creds = PathBuf::from(h).join(".claude").join(".credentials.json");
-        if claude_creds.exists() {
-            return true;
-        }
-    }
-    false
 }
 
 fn save_and_report(

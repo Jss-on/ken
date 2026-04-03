@@ -92,14 +92,9 @@ pub enum StopReason {
     MaxTokens,
 }
 
-/// Credential passed to the API client — determines the auth header used.
+/// API key credential — sent as `x-api-key` header.
 #[derive(Debug, Clone)]
-pub enum ApiCredential {
-    /// Raw API key — sent as `x-api-key` header
-    ApiKey(String),
-    /// OAuth access token — sent as `Authorization: Bearer` header
-    BearerToken(String),
-}
+pub struct ApiKey(pub String);
 
 /// Errors from the API layer
 #[derive(Debug, thiserror::Error)]

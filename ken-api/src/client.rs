@@ -9,12 +9,12 @@ const MAX_RETRIES: u32 = 2;
 
 pub struct AnthropicClient {
     client: Client,
-    credential: ApiCredential,
+    api_key: String,
     model: String,
 }
 
 impl AnthropicClient {
-    pub fn new(credential: ApiCredential) -> Result<Self, ApiError> {
+    pub fn new(api_key: impl Into<String>) -> Result<Self, ApiError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(120))
             .build()
@@ -22,7 +22,7 @@ impl AnthropicClient {
 
         Ok(Self {
             client,
-            credential,
+            api_key: api_key.into(),
             model: DEFAULT_MODEL.to_string(),
         })
     }
@@ -54,20 +54,12 @@ impl AnthropicClient {
     }
 
     fn try_send(&self, request: &ApiRequest) -> Result<AssistantResponse, ApiError> {
-        let mut req = self
+        let resp = self
             .client
             .post(API_URL)
             .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
-
-        req = match &self.credential {
-            ApiCredential::ApiKey(key) => req.header("x-api-key", key),
-            ApiCredential::BearerToken(token) => {
-                req.header("Authorization", format!("Bearer {token}"))
-            }
-        };
-
-        let resp = req
+            .header("content-type", "application/json")
+            .header("x-api-key", &self.api_key)
             .json(request)
             .send()
             .map_err(|e| ApiError::Network(e.to_string()))?;
@@ -75,7 +67,6 @@ impl AnthropicClient {
         let status = resp.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
             let body = resp.text().unwrap_or_default();
-            // Surface the actual error message from the API
             if let Ok(err_json) = serde_json::from_str::<serde_json::Value>(&body)
                 && let Some(msg) = err_json["error"]["message"].as_str()
             {
@@ -151,7 +142,6 @@ impl AnthropicClient {
                 Some("content_block_delta") => {
                     if let Some(txt) = event["delta"]["text"].as_str() {
                         text.push_str(txt);
-                        // Print streaming text to stdout
                         eprint!("{txt}");
                     }
                     if let Some(json_chunk) = event["delta"]["partial_json"].as_str() {
@@ -188,7 +178,7 @@ impl AnthropicClient {
                 _ => {}
             }
         }
-        eprintln!(); // newline after streaming
+        eprintln!();
 
         Ok(AssistantResponse {
             text,
@@ -245,25 +235,12 @@ impl AnthropicClient {
         &self.model
     }
 
-    /// Make a minimal API call to verify that a credential is accepted.
-    /// Returns `Ok(())` on success, or a descriptive error on failure.
-    pub fn validate_credential(credential: &ApiCredential) -> Result<(), ApiError> {
+    /// Make a minimal API call to verify that an API key is accepted.
+    pub fn validate_api_key(api_key: &str) -> Result<(), ApiError> {
         let client = Client::builder()
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| ApiError::Network(format!("failed to build HTTP client: {e}")))?;
-
-        let mut req = client
-            .post(API_URL)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json");
-
-        req = match credential {
-            ApiCredential::ApiKey(key) => req.header("x-api-key", key),
-            ApiCredential::BearerToken(token) => {
-                req.header("Authorization", format!("Bearer {token}"))
-            }
-        };
 
         let body = serde_json::json!({
             "model": "claude-haiku-4-5-20251001",
@@ -271,7 +248,11 @@ impl AnthropicClient {
             "messages": [{"role": "user", "content": "hi"}],
         });
 
-        let resp = req
+        let resp = client
+            .post(API_URL)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .header("x-api-key", api_key)
             .json(&body)
             .send()
             .map_err(|e| ApiError::Network(e.to_string()))?;

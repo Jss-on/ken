@@ -16,9 +16,6 @@ pub struct Config {
     pub default_symbol: Option<String>,
     #[serde(default)]
     pub default_timeframe: Option<String>,
-    /// If true, fall back to Claude Code OAuth credentials (~/.claude/.credentials.json)
-    #[serde(default)]
-    pub use_claude_credentials: bool,
 }
 
 fn default_model() -> String {
@@ -38,7 +35,6 @@ impl Default for Config {
             default_exchange: Some("binance".to_string()),
             default_symbol: None,
             default_timeframe: None,
-            use_claude_credentials: false,
         }
     }
 }
@@ -97,9 +93,6 @@ impl Config {
         }
         if other.default_timeframe.is_some() {
             self.default_timeframe = other.default_timeframe;
-        }
-        if other.use_claude_credentials {
-            self.use_claude_credentials = true;
         }
     }
 
